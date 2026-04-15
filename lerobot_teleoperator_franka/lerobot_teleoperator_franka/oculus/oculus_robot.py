@@ -1,5 +1,7 @@
 from typing import Dict, Optional, Sequence, Tuple
 import logging
+import threading
+import time as _time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -67,6 +69,11 @@ class OculusRobot(Robot):
         self._last_valid_action = np.zeros(7 if use_gripper else 6)
         self._prev_transform = None
         self._reset_requested = False
+
+        # High-rate velocity control (Reference2 ros2_bridge pattern)
+        self._vel_control_running = False
+        self._vel_control_thread: threading.Thread | None = None
+        self._vel_client = None  # dedicated FrankaInterfaceClient for velocity thread
 
         # --- Placo IK ---
         self._ik_enabled = False
@@ -210,6 +217,133 @@ class OculusRobot(Robot):
             logger.info(f"[PLACO] Synced model to real joints after reset, EE: {T_current[:3, 3]}")
         except Exception as e:
             logger.warning(f"[PLACO] Failed to sync after reset: {e}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # High-rate velocity control (Reference2 ros2_bridge architecture)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def start_velocity_control(self, robot_ip: str, robot_port: int,
+                               hz: float = 50.0, udp_port: int = 4243):
+        """Start 50Hz background loop: read Oculus cache → compute velocity → send to server via UDP.
+
+        Uses a raw UDP socket instead of zerorpc to avoid gevent threading constraints.
+        Mirrors Reference2/fr3_teleop/ros2_bridge.py:
+          - New Quest frame  → compute velocity = delta / dt, send UDP packet
+          - Same Quest frame → don't send (server velocity expires via max_age_s)
+          - RG released      → stop sending (expiry handles clear)
+        The recording loop (15Hz) continues independently for dataset capture.
+        """
+        self._vel_server_ip = robot_ip
+        self._vel_server_udp_port = udp_port
+        self._vel_control_hz = hz
+        self._vel_control_running = True
+        self._vel_control_thread = threading.Thread(
+            target=self._velocity_control_loop, daemon=True, name="oculus-vel-ctrl"
+        )
+        self._vel_control_thread.start()
+        logger.info(f"[VEL-CTRL] Started {hz}Hz velocity control → UDP {robot_ip}:{udp_port}")
+
+    def stop_velocity_control(self):
+        """Stop background velocity thread."""
+        self._vel_control_running = False
+        if self._vel_control_thread is not None:
+            self._vel_control_thread.join(timeout=1.0)
+            self._vel_control_thread = None
+        logger.info("[VEL-CTRL] Stopped velocity control")
+
+    def _compute_velocity_from_transforms(
+        self, current: np.ndarray, prev: np.ndarray, dt: float,
+        max_linear: float = 0.25, max_angular: float = 1.20,
+    ) -> np.ndarray:
+        """Compute 6D EE velocity [m/s, rad/s] in robot frame from two consecutive transforms.
+        Applies pose_scaler and channel_signs (same as _compute_delta_pose).
+        """
+        # Position: Oculus → robot frame
+        oculus_delta_pos = current[:3, 3] - prev[:3, 3]
+        robot_delta_pos = self.T_OCULUS_TO_ROBOT @ oculus_delta_pos
+
+        # Rotation delta
+        delta_rot_oculus = current[:3, :3] @ prev[:3, :3].T
+        oculus_rv = R.from_matrix(delta_rot_oculus).as_rotvec()
+        robot_rv = np.array([oculus_rv[2], oculus_rv[0], oculus_rv[1]])  # same as _compute_delta_pose
+
+        # Scale and signs
+        ps, rs = self._pose_scaler[0], self._pose_scaler[1]
+        s = self._channel_signs
+        robot_delta_pos = np.array([
+            robot_delta_pos[0] * ps * s[0],
+            robot_delta_pos[1] * ps * s[1],
+            robot_delta_pos[2] * ps * s[2],
+        ])
+        robot_rv = np.array([
+            robot_rv[0] * rs * s[3],
+            robot_rv[1] * rs * s[4],
+            robot_rv[2] * rs * s[5],
+        ])
+
+        # Velocity = delta / dt, clamped
+        return np.concatenate([
+            np.clip(robot_delta_pos / dt, -max_linear, max_linear),
+            np.clip(robot_rv / dt, -max_angular, max_angular),
+        ])
+
+    def _velocity_control_loop(self):
+        """50Hz loop — Reference2 ros2_bridge._on_timer() equivalent.
+
+        OculusReader.get_transformations_and_buttons() is O(1) (reads ADB-updated cache).
+        We detect new Quest frames by comparing transform bytes — exactly like
+        Reference2's `frame.timestamp_ns == self._last_frame_timestamp_ns` check.
+
+        Sends velocity via UDP (struct-packed 6 doubles) to avoid gevent/zerorpc
+        threading constraints. Server receives on port 4243 via a plain OS thread.
+        """
+        import socket, struct
+        _PACKET = struct.Struct('<6d')
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        target_dt = 1.0 / self._vel_control_hz
+        vc_prev = None       # background thread's own prev transform
+        vc_prev_time = None
+        vc_last_key = None   # bytes of last seen transform, for change detection
+
+        try:
+            while self._vel_control_running:
+                t0 = _time.monotonic()
+
+                transforms, buttons = self._oculus_reader.get_transformations_and_buttons()
+                rg = bool(buttons.get('RG', False)) if buttons else False
+
+                if rg and transforms and 'r' in transforms:
+                    cur = transforms['r']
+                    now = _time.monotonic()
+                    key = cur.tobytes()
+
+                    if key != vc_last_key:
+                        # ── New Quest frame ──────────────────────────────────────
+                        if vc_prev is not None:
+                            dt = max(min(now - vc_prev_time, 0.2), 0.002)
+                            vel = self._compute_velocity_from_transforms(cur, vc_prev, dt)
+                            try:
+                                sock.sendto(_PACKET.pack(*vel),
+                                            (self._vel_server_ip, self._vel_server_udp_port))
+                            except Exception:
+                                pass
+                        # First frame after RG press: anchor position, send nothing
+                        vc_prev = cur.copy()
+                        vc_prev_time = now
+                        vc_last_key = key
+                    # else: same frame — don't send, server velocity expires after max_age_s
+
+                elif vc_prev is not None:
+                    # ── RG just released — reset state, server expires naturally ────
+                    vc_prev = None
+                    vc_prev_time = None
+                    vc_last_key = None
+
+                elapsed = _time.monotonic() - t0
+                _time.sleep(max(0.0, target_dt - elapsed))
+        finally:
+            sock.close()
 
     def _solve_ik(self, target_ee_pose: np.ndarray) -> Optional[np.ndarray]:
         """

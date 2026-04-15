@@ -41,10 +41,14 @@ class Franka(Robot):
         self._dt = 0.002
         self._last_gripper_position = 1
         
-        # 动作平滑：指数移动平均 (EMA) 滤波器
-        self._smoothing_alpha = 0.2  # 平滑系数，越小越平滑 (0~1)
-        self._smoothed_delta = None  # 上一次平滑后的 delta
-        
+        # Velocity-based control (Reference/fr3_teleop/mapper.py pattern)
+        self._fps = 15                          # must match record fps in config
+        self._smoothing_alpha = 0.3             # EMA coefficient for velocity smoothing (higher = more responsive)
+        self._smoothed_vel = None               # smoothed 6D velocity [m/s, rad/s]
+        self._max_linear_vel_mps = 0.25         # max linear velocity m/s (from reference)
+        self._max_angular_vel_rps = 1.20        # max angular velocity rad/s (from reference)
+
+
     def connect(self) -> None:
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self.name} is already connected.")
@@ -85,7 +89,10 @@ class Franka(Robot):
             logger.info("\n===== [ROBOT] Connecting to Franka robot =====")
             
             franka = FrankaInterfaceClient(ip=robot_ip, port=4242)
-            franka.robot_start_joint_impedance_control()
+            if self.config.execute_mode == "ee_pose":
+                franka.robot_start_cartesian_impedance_control()
+            else:
+                franka.robot_start_joint_impedance_control()
 
             joint_positions = franka.robot_get_joint_positions()
             if joint_positions is not None and len(joint_positions) == 7:
@@ -219,7 +226,7 @@ class Franka(Robot):
                     force=self._gripper_force,
                 )
                 self._last_gripper_position = gripper_position
-            
+
             gripper_state = self._robot.gripper_get_state()
             gripper_state_norm = max(0.0, min(1.0, gripper_state["width"] / self.config.gripper_max_open))
             if self.config.gripper_reverse:
@@ -274,108 +281,39 @@ class Franka(Robot):
             self._handle_gripper(action["gripper_position"], is_binary=False)
 
     def _send_action_cartesian(self, action: dict[str, Any]) -> None:
-        """Send action in spacemouse/oculus mode (delta ee pose)."""
+        """Send action in spacemouse/oculus mode.
+
+        Velocity is sent by the OculusTeleop background thread (50Hz, Reference2 architecture).
+        This method only handles reset and gripper — it does NOT call robot_set_velocity.
+        """
         # Check for reset request
         if action.get("reset_requested", False):
             logger.info("[ROBOT] Reset requested, moving to home position...")
-            try:
-                # ee_positions_reset= np.array(
-                #     [0.55581301, 0.00308523, 0.44111654, -2.22150303, -2.15458315, 0.00646556]
-                # )
-                # self._robot.robot_move_to_ee_pose(pose = ee_positions_reset, time_to_go=2.0)
-                # self._robot.gripper_goto(
-                #     width=self.config.gripper_max_open,
-                #     speed=self._gripper_speed,
-                #     force=self._gripper_force,
-                #     blocking=True
-                # )
-                self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=5.0)
-                self._robot.gripper_goto(
-                    width=self.config.gripper_max_open,
-                    speed=self._gripper_speed,
-                    force=self._gripper_force,
-                    blocking=True
-                )
-                self._robot.robot_start_joint_impedance_control()
-            except Exception as e:
-                logger.warning(f"[ROBOT] Reset failed: {e}, trying to restart controller...")
+            if not self.config.debug:
                 try:
-                    self._robot.robot_start_joint_impedance_control()
-                except Exception as e2:
-                    logger.error(f"[ROBOT] Failed to restart controller: {e2}")
-            return
-        
-        delta_ee_pose = np.array([action[f"delta_ee_pose.{axis}"] for axis in ["x", "y", "z", "rx", "ry", "rz"]])
-
-        # --- EMA 动作平滑 ---
-        if np.linalg.norm(delta_ee_pose) < 1e-6:
-            # 输入为零（RG 没按），重置平滑状态
-            self._smoothed_delta = None
-        else:
-            if self._smoothed_delta is None:
-                self._smoothed_delta = delta_ee_pose.copy()
-            else:
-                alpha = self._smoothing_alpha
-                self._smoothed_delta = alpha * delta_ee_pose + (1 - alpha) * self._smoothed_delta
-            delta_ee_pose = self._smoothed_delta.copy()
-
-        if not self.config.debug:
-            import scipy.spatial.transform as st
-
-            try:
-                ee_pose = self._robot.robot_get_ee_pose()
-            except Exception as e:
-                logger.warning(f"[ROBOT] Failed to get ee pose: {e}")
-                if "gripper_cmd_bin" in action:
-                    self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
-                return
-
-            # 计算位置和旋转的变化量
-            position_delta = np.linalg.norm(delta_ee_pose[:3])
-            rotation_delta = np.linalg.norm(delta_ee_pose[3:])
-            
-            # 设置阈值：位置变化超过 0.03m 或旋转变化超过 0.2rad 时进行插值
-            max_position_step = 0.02  # 每步最大位置变化 (米)
-            max_rotation_step = 0.1   # 每步最大旋转变化 (弧度)
-            
-            # 计算需要的插值步数
-            position_steps = max(1, int(np.ceil(position_delta / max_position_step))) if position_delta > 0 else 1
-            rotation_steps = max(1, int(np.ceil(rotation_delta / max_rotation_step))) if rotation_delta > 0 else 1
-            num_steps = max(position_steps, rotation_steps)
-            
-            # 如果动作太大，进行插值
-            if num_steps > 1:
-                logger.debug(f"[ROBOT] Large delta detected, interpolating with {num_steps} steps")
-                
-                for step in range(1, num_steps + 1):
-                    alpha = step / num_steps
-                    interpolated_delta = delta_ee_pose * alpha
-                    
-                    target_position = ee_pose[:3] + interpolated_delta[:3]
-                    current_rot = st.Rotation.from_rotvec(ee_pose[3:])
-                    delta_rot = st.Rotation.from_rotvec(interpolated_delta[3:])
-                    target_rotation = delta_rot * current_rot
-                    target_rotvec = target_rotation.as_rotvec()
-                    target_ee_pose = np.concatenate([target_position, target_rotvec])
-                    try:
-                        self._robot.robot_update_desired_ee_pose(target_ee_pose)
-                    except Exception as e:
-                        logger.warning(f"[ROBOT] zerorpc error during interpolation step {step}: {e}")
-                        break
-                    time.sleep(0.01)  # 每步间隔 10ms
-            elif np.linalg.norm(delta_ee_pose) >= 0.01:
-                # 正常小动作，直接执行
-                target_position = ee_pose[:3] + delta_ee_pose[:3]
-                current_rot = st.Rotation.from_rotvec(ee_pose[3:])
-                delta_rot = st.Rotation.from_rotvec(delta_ee_pose[3:])
-                target_rotation = delta_rot * current_rot
-                target_rotvec = target_rotation.as_rotvec()
-                target_ee_pose = np.concatenate([target_position, target_rotvec])
-                try:
-                    self._robot.robot_update_desired_ee_pose(target_ee_pose)
+                    # Explicitly clear server velocity before blocking move
+                    self._robot.robot_clear_velocity()
+                    self._robot.robot_move_to_joint_positions(positions=HOME_JOINT_POSITION, time_to_go=5.0)
+                    self._robot.gripper_goto(
+                        width=self.config.gripper_max_open,
+                        speed=self._gripper_speed,
+                        force=self._gripper_force,
+                        blocking=True
+                    )
+                    # Restart cartesian impedance — seeds _current_target from actual EE pose
+                    self._robot.robot_start_cartesian_impedance_control()
                 except Exception as e:
-                    logger.warning(f"[ROBOT] zerorpc error: {e}")
-        
+                    logger.warning(f"[ROBOT] Reset failed: {e}")
+                    try:
+                        self._robot.robot_start_cartesian_impedance_control()
+                    except Exception as e2:
+                        logger.error(f"[ROBOT] Failed to restart controller: {e2}")
+            if "gripper_cmd_bin" in action:
+                self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
+            return
+
+        # Velocity is handled by OculusTeleop's 50Hz background thread.
+        # This method only needs to handle gripper.
         if "gripper_cmd_bin" in action:
             self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
 
@@ -452,11 +390,7 @@ class Franka(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
         
         try:
-            # Read joint positions
             joint_position = self._robot.robot_get_joint_positions()
-            # Read joint velocities
-            # joint_velocity = self._robot.robot_get_joint_velocities()
-            # Read end effector pose
             ee_pose = self._robot.robot_get_ee_pose()
         except Exception as e:
             logger.warning(f"[ROBOT] zerorpc error in get_observation: {e}")

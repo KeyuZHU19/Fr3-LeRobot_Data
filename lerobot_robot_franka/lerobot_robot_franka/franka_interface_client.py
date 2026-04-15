@@ -144,7 +144,7 @@ class FrankaInterfaceClient:
         )
         print(f"[ROBOT] Joint impedance control started")
 
-    def robot_start_cartesian_impedance_control(self, Kx: np.ndarray, Kxd: np.ndarray):
+    def robot_start_cartesian_impedance_control(self, Kx: np.ndarray = None, Kxd: np.ndarray = None):
         self.server.robot_start_cartesian_impedance_control(
             Kx.tolist() if Kx is not None else None,
             Kxd.tolist() if Kxd is not None else None,
@@ -163,6 +163,21 @@ class FrankaInterfaceClient:
             self.server.robot_update_desired_ee_pose(pose.tolist())
         except Exception as e:
             log.warning(f"[ROBOT] robot_update_desired_ee_pose failed: {e}")
+
+    def robot_set_velocity(self, velocity):
+        """Non-blocking: push 6D velocity [vx,vy,vz,wx,wy,wz] m/s+rad/s to server's 50Hz integration loop."""
+        try:
+            vel_list = velocity.tolist() if hasattr(velocity, 'tolist') else list(velocity)
+            self.server.robot_set_velocity(vel_list)
+        except Exception as e:
+            log.warning(f"[ROBOT] robot_set_velocity failed: {e}")
+
+    def robot_clear_velocity(self):
+        """Clear velocity — server stops integrating, robot holds position via impedance spring."""
+        try:
+            self.server.robot_clear_velocity()
+        except Exception as e:
+            log.warning(f"[ROBOT] robot_clear_velocity failed: {e}")
 
     def robot_terminate_current_policy(self):
         self.server.robot_terminate_current_policy()

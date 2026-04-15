@@ -38,7 +38,7 @@ record:
       placo_dt: 0.01
       # Placo IK settings for oculus joint mode
       enable_ik: False               # 是否启用 Placo IK 计算关节位置（run_policy 时可设为 False）
-      robot_ip: "192.168.110.15"    # Franka robot IP for reading current joint states
+      robot_ip: "127.0.0.1"          # Franka robot IP for UDP velocity (same machine as server)
       robot_port: 4242              # Franka zerorpc port
       ik_urdf_path: "assets/franka_urdf/fr3v2_no_mesh.urdf"  # No-mesh URDF for IK solver, empty to disable
       ik_iterations: 30              # IK 求解迭代次数，值越大精度越高但更慢（推荐 8~15）

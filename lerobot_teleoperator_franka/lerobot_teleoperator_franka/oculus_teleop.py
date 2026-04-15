@@ -69,11 +69,16 @@ class OculusTeleop(BaseTeleop):
         )
         ik_status = "enabled" if self.oculus_robot._ik_enabled else "disabled"
         logger.info(f"[TELEOP] Oculus connected at IP: {self.cfg.ip}, IK: {ik_status}")
-    
+
+        # Start 50Hz velocity control loop (Reference2 architecture)
+        # Runs independently of the 15Hz recording loop for smooth robot motion
+        if self.cfg.robot_ip:
+            self.oculus_robot.start_velocity_control(self.cfg.robot_ip, self.cfg.robot_port)
+
     def _disconnect_impl(self) -> None:
         """Disconnect from Oculus Quest."""
-        # OculusRobot doesn't have explicit disconnect, just let it be garbage collected
-        pass
+        if self.oculus_robot is not None:
+            self.oculus_robot.stop_velocity_control()
     
     def _get_action_impl(self) -> Dict[str, Any]:
         """Get delta pose from Oculus controller."""
