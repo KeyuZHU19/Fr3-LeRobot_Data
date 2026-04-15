@@ -12,6 +12,8 @@ from lerobot_teleoperator_franka import (
 )
 from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+from lerobot.cameras.zed.configuration_zed import ZedCameraConfig
 from lerobot.scripts.lerobot_record import record_loop
 from lerobot.processor import make_default_processors
 from lerobot.utils.visualization_utils import init_rerun
@@ -83,8 +85,13 @@ class RecordConfig:
         self.save_mera_period: int = time.get("save_mera_period", 1)
         
         # Cameras config
-        self.wrist_cam_serial: str = cam["wrist_cam_serial"]
-        self.exterior_cam_serial: str = cam["exterior_cam_serial"]
+        self.camera_type: str = cam.get("camera_type", "realsense")
+        self.wrist_cam_serial: str = cam.get("wrist_cam_serial", "")
+        self.exterior_cam_serial: str = cam.get("exterior_cam_serial", "")
+        self.wrist_cam_index: int = cam.get("wrist_cam_index", 0)
+        self.exterior_cam_index: int = cam.get("exterior_cam_index", 2)
+        self.wrist_zed_serial: int = cam.get("wrist_zed_serial", 0)
+        self.exterior_zed_serial: int = cam.get("exterior_zed_serial", 0)
         self.width: int = cam["width"]
         self.height: int = cam["height"]
         
@@ -235,22 +242,60 @@ def run_record(record_cfg: RecordConfig):
         # if not record_cfg.debug:
         #     check_joint_offsets(record_cfg)        
         
-        # Create RealSenseCamera configurations
-        wrist_image_cfg = RealSenseCameraConfig(serial_number_or_name=record_cfg.wrist_cam_serial,
-                                        fps=record_cfg.fps,
-                                        width=record_cfg.width,
-                                        height=record_cfg.height,
-                                        color_mode=ColorMode.RGB,
-                                        use_depth=False,
-                                        rotation=Cv2Rotation.NO_ROTATION)
-
-        exterior_image_cfg = RealSenseCameraConfig(serial_number_or_name=record_cfg.exterior_cam_serial,
-                                        fps=record_cfg.fps,
-                                        width=record_cfg.width,
-                                        height=record_cfg.height,
-                                        color_mode=ColorMode.RGB,
-                                        use_depth=False,
-                                        rotation=Cv2Rotation.NO_ROTATION)
+        # Create camera configurations
+        if record_cfg.camera_type == "zed":
+            wrist_image_cfg = ZedCameraConfig(
+                serial_number=record_cfg.wrist_zed_serial,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                view="left",
+            )
+            exterior_image_cfg = ZedCameraConfig(
+                serial_number=record_cfg.exterior_zed_serial,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                view="right",
+            )
+        elif record_cfg.camera_type == "opencv":
+            wrist_image_cfg = OpenCVCameraConfig(
+                index_or_path=record_cfg.wrist_cam_index,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                rotation=Cv2Rotation.NO_ROTATION,
+            )
+            exterior_image_cfg = OpenCVCameraConfig(
+                index_or_path=record_cfg.exterior_cam_index,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                rotation=Cv2Rotation.NO_ROTATION,
+            )
+        else:
+            wrist_image_cfg = RealSenseCameraConfig(
+                serial_number_or_name=record_cfg.wrist_cam_serial,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                use_depth=False,
+                rotation=Cv2Rotation.NO_ROTATION,
+            )
+            exterior_image_cfg = RealSenseCameraConfig(
+                serial_number_or_name=record_cfg.exterior_cam_serial,
+                fps=record_cfg.fps,
+                width=record_cfg.width,
+                height=record_cfg.height,
+                color_mode=ColorMode.RGB,
+                use_depth=False,
+                rotation=Cv2Rotation.NO_ROTATION,
+            )
 
         # Create the robot and teleoperator configurations
         camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}

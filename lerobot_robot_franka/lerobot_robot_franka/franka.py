@@ -15,7 +15,7 @@ from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
 
 HOME_JOINT_POSITION = np.array(
-    [1.58472168, -1.56486702, -1.74356186, -2.634835, -0.11180906, 4.2022109, -1.51133597]
+    [0, -0.78539816339, 0, -2.35619449019, 0, 1.57079632679, 0.78539816339]
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class Franka(Robot):
         self._last_gripper_position = 1
         
         # 动作平滑：指数移动平均 (EMA) 滤波器
-        self._smoothing_alpha = 0.4  # 平滑系数，越小越平滑 (0~1)，0.4 是较好的折中
+        self._smoothing_alpha = 0.2  # 平滑系数，越小越平滑 (0~1)
         self._smoothed_delta = None  # 上一次平滑后的 delta
         
     def connect(self) -> None:

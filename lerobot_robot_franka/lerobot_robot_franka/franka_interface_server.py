@@ -41,8 +41,6 @@ class FrankaInterfaceServer:
             width=width,
             speed=speed,
             force=force,
-            epsilon_inner=epsilon_inner,
-            epsilon_outer=epsilon_outer,
             blocking=blocking,
         )
 

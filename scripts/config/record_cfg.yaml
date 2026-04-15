@@ -28,9 +28,9 @@ record:
       use_gripper: *use_gripper # whether the spacemouse robot can use gripper
       pose_scaler: [0.01, 0.05] # scaler for spacemouse actions [position, attitude]
     oculus_config:
-      ip: "192.168.110.62"  # Oculus Quest IP address
+      ip: null  # null = USB connection; set to Quest IP string for wireless ADB
       use_gripper: *use_gripper
-      pose_scaler: [3.0, 2.0]  # scaler for oculus actions [position, attitude]
+      pose_scaler: [2.0, 1.5]  # scaler for oculus actions [position, attitude]
       channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
       # channel_signs: [-1, -1, 1, 1, 1, 1] # mirror
     placo:
@@ -57,20 +57,20 @@ record:
       
   robot:
     # ip: &ip "172.16.0.2" # robot ip
-    ip: &ip "192.168.110.15" # NUC ip
+    ip: &ip "127.0.0.1" # this machine (NUC role)
     use_gripper: *use_gripper
     close_threshold: 0.7 # threshold to determine gripper open/close
     gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
     # gripper_port: &gripper_port "/dev/franka_left_gripper" # gripper_port
     gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.085 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
+    gripper_max_open: 0.15 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
     # Execute mode for oculus control: "ee_pose" (cartesian impedance) or "joint" (joint impedance via Placo IK)
     execute_mode: "ee_pose"
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
     device: "cuda"  # 运行设备 (cuda, cpu)
-    push_to_hub: False  # 禁用模型推送
+    push_to_hub: True  # 禁用模型推送
     # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test-0310/diffusion_test1/checkpoints/last/pretrained_model"
     pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/zhonghuai/lajiao_20260318_merged/act_test2/checkpoints/last/pretrained_model"
     # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test/act_test3/checkpoints/020000/pretrained_model"  
@@ -92,10 +92,17 @@ record:
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    wrist_cam_serial: "344322074412" # wrist camera serial number 243222071212 344322074412
-    exterior_cam_serial: "243322071821" # exterior camera serial number 243322071821 339322074423
-    width: 424 # 640 424
-    height: 240 # 360 240
+    camera_type: "zed"  # "realsense", "opencv", or "zed"
+    # ZED camera serial numbers (0 = first available)
+    wrist_zed_serial: 11130146    # ZED-M wrist camera (left eye)
+    exterior_zed_serial: 11130146 # ZED-M exterior camera (right eye) - same device, different view
+    # For realsense/opencv (unused):
+    wrist_cam_serial: "344322074412"
+    exterior_cam_serial: "243322071821"
+    wrist_cam_index: 0
+    exterior_cam_index: 2
+    width: 672   # ZED VGA: 672x376 (fastest, good for teleoperation)
+    height: 376
 
   storage:
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
