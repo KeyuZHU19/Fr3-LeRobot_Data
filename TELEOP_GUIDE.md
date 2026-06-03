@@ -5,7 +5,7 @@
 | 按键 | 功能 |
 |------|------|
 | **RG（右手握持）** | 按住才能移动机器人 |
-| **RTr（右手扳机）** | 按下关闭夹爪，松开打开夹爪 |
+| **RTr（右手扳机）** | 每按一下切换一次夹爪状态（张开/闭合） |
 | **A 按钮** | 复位机器人到初始位置 |
 | **右手控制器位姿** | 控制末端执行器位置和姿态 |
 
@@ -36,6 +36,7 @@ launch_gripper.py gripper=franka_hand
 
 # 终端 3：启动 interface server
 conda activate polymetis-local
+cd lerobot_robot_franka/lerobot_robot_franka
 python franka_interface_server.py
 ```
 

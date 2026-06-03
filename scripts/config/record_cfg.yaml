@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "Kit-Key/test1" 
+  repo_id: &repo_id "Kit-Key/plate_pick_and_place" # dataset repository name on HuggingFace, used for pushing the dataset after recording
   # repo_id: &repo_id "PhysBrain/PnP_Veg" 
   # repo_id: &repo_id "scylearning/pick_greencube_into_trashb
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
@@ -30,7 +30,7 @@ record:
     oculus_config:
       ip: null  # null = USB connection; set to Quest IP string for wireless ADB
       use_gripper: *use_gripper
-      pose_scaler: [2.0, 1.5]  # scaler for oculus actions [position, attitude]
+      pose_scaler: [2.5, 1.5]  # scaler for oculus actions [position, attitude]
       channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
       # channel_signs: [-1, -1, 1, 1, 1, 1] # mirror
     placo:
@@ -63,7 +63,12 @@ record:
     gripper_bin_threshold: 0.85 # threshold to determine gripper is closed
     # gripper_port: &gripper_port "/dev/franka_left_gripper" # gripper_port
     gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.15 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
+    gripper_max_open: 0.08 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
+    gripper_force: 70.0 # stronger grasp for weighted cubes; increase carefully if still slipping
+    gripper_speed: 0.10 # slower close to improve contact stability on lift
+    gripper_grasp_width: 0.030 # larger target width for thicker 2-3 cm cubes
+    gripper_epsilon_inner: 0.006
+    gripper_epsilon_outer: 0.006
     # Execute mode for oculus control: "ee_pose" (cartesian impedance) or "joint" (joint impedance via Placo IK)
     execute_mode: "ee_pose"
 
@@ -81,8 +86,8 @@ record:
     description: "pick up the Shanghai Green and put them into the brown basket" # task description
     # description: "pick up the red chili and put it into the brown basket" # task description
     # description: "pick up the red chili and put it into the brown basket"
-    num_episodes: 10 # number of episodes to record
-    display: True # Whether to display the data during recording
+    num_episodes: 50 # number of episodes to record
+    display: False # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
   
@@ -93,19 +98,31 @@ record:
 
   cameras:
     camera_type: "zed"  # "realsense", "opencv", or "zed"
-    # ZED camera serial numbers (0 = first available)
-    wrist_zed_serial: 11130146    # ZED-M wrist camera (left eye)
-    exterior_zed_serial: 11130146 # ZED-M exterior camera (right eye) - same device, different view
+    # ZED setup:
+    # - One stereo ZED: set wrist/exterior to the same serial and use left/right views.
+    # - Three physical ZED cameras: set wrist + exterior + exterior2 to three serials.
+    wrist_zed_serial: 35207644     # ZED 2i wrist camera
+    exterior_zed_serial: 34533645  # ZED 2i exterior camera 1
+    exterior2_zed_serial: 11130146 # ZED-M exterior camera 2
+    wrist_zed_view: "left"
+    exterior_zed_view: "left"
+    exterior2_zed_view: "left"
+    wrist_zed_rotation: 0
+    exterior_zed_rotation: 0
+    exterior2_zed_rotation: 180
     # For realsense/opencv (unused):
     wrist_cam_serial: "344322074412"
     exterior_cam_serial: "243322071821"
+    exterior2_cam_serial: ""
     wrist_cam_index: 0
     exterior_cam_index: 2
-    width: 672   # ZED VGA: 672x376 (fastest, good for teleoperation)
+    exterior2_cam_index: 1
+    width: 672    # Lowest supported ZED resolution, best for recording stability
     height: 376
 
   storage:
     push_to_hub: True # whether to push the dataset to your huggingface repo after recording
+    use_videos: True # True = save camera streams as videos in the dataset
 
 replay:
   dataset_name: babycare/milk_power_20260321_v03
@@ -118,7 +135,3 @@ replay:
 visualize:
   dataset_name: babycare/milk_power_20260321_v03
   episode_index: 0 # episode index to visualize
-
-
-
-

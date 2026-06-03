@@ -34,9 +34,11 @@ class Franka(Robot):
         self._initial_pose = None
         self._prev_observation = None
         self._num_joints = 7
-        self._gripper_force = 20
-        self._gripper_speed = 0.2
-        self._gripper_epsilon = 1.0
+        self._gripper_force = self.config.gripper_force
+        self._gripper_speed = self.config.gripper_speed
+        self._gripper_grasp_width = self.config.gripper_grasp_width
+        self._gripper_epsilon_inner = self.config.gripper_epsilon_inner
+        self._gripper_epsilon_outer = self.config.gripper_epsilon_outer
         self._gripper_position = 1
         self._dt = 0.002
         self._last_gripper_position = 1
@@ -63,9 +65,20 @@ class Franka(Robot):
 
         # Connect cameras
         logger.info("\n===== [CAM] Initializing Cameras =====")
-        for cam_name, cam in self.cameras.items():
-            cam.connect()
-            logger.info(f"[CAM] {cam_name} connected successfully.")
+        connected_cameras = []
+        try:
+            for cam_name, cam in self.cameras.items():
+                cam.connect()
+                connected_cameras.append((cam_name, cam))
+                logger.info(f"[CAM] {cam_name} connected successfully.")
+        except Exception:
+            logger.error("[CAM] Camera initialization failed. Cleaning up connected cameras before aborting.")
+            for _, cam in reversed(connected_cameras):
+                try:
+                    cam.disconnect()
+                except Exception:
+                    pass
+            raise
         logger.info("===== [CAM] Cameras Initialized Successfully =====\n")
 
         self.is_connected = True
@@ -220,11 +233,20 @@ class Franka(Robot):
 
         try:
             if gripper_position != self._last_gripper_position:
-                self._robot.gripper_goto(
-                    width=gripper_position * self.config.gripper_max_open,
-                    speed=self._gripper_speed,
-                    force=self._gripper_force,
-                )
+                if gripper_position <= 0.0:
+                    self._robot.gripper_grasp(
+                        speed=self._gripper_speed,
+                        force=self._gripper_force,
+                        grasp_width=self._gripper_grasp_width,
+                        epsilon_inner=self._gripper_epsilon_inner,
+                        epsilon_outer=self._gripper_epsilon_outer,
+                    )
+                else:
+                    self._robot.gripper_goto(
+                        width=self.config.gripper_max_open,
+                        speed=self._gripper_speed,
+                        force=self._gripper_force,
+                    )
                 self._last_gripper_position = gripper_position
 
             gripper_state = self._robot.gripper_get_state()
@@ -423,7 +445,10 @@ class Franka(Robot):
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.read()
+            try:
+                obs_dict[cam_key] = cam.async_read(timeout_ms=10)
+            except Exception:
+                obs_dict[cam_key] = cam.read()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 

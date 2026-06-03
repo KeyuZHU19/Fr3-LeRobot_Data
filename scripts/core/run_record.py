@@ -1,6 +1,9 @@
 import yaml
+import time
+from collections import deque
 from pathlib import Path
 from typing import Dict, Any
+import numpy as np
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
 from lerobot_robot_franka import FrankaConfig, Franka
 from lerobot_teleoperator_franka import (
@@ -33,6 +36,165 @@ from dataclasses import field
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def _parse_cv2_rotation(value: Any) -> Cv2Rotation:
+    if isinstance(value, Cv2Rotation):
+        return value
+    if value is None:
+        return Cv2Rotation.NO_ROTATION
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        alias_map = {
+            "0": Cv2Rotation.NO_ROTATION,
+            "NO_ROTATION": Cv2Rotation.NO_ROTATION,
+            "NONE": Cv2Rotation.NO_ROTATION,
+            "90": Cv2Rotation.ROTATE_90,
+            "ROTATE_90": Cv2Rotation.ROTATE_90,
+            "180": Cv2Rotation.ROTATE_180,
+            "ROTATE_180": Cv2Rotation.ROTATE_180,
+            "-90": Cv2Rotation.ROTATE_270,
+            "270": Cv2Rotation.ROTATE_270,
+            "ROTATE_270": Cv2Rotation.ROTATE_270,
+        }
+        if normalized in alias_map:
+            return alias_map[normalized]
+    if value in {0, 90, 180, -90, 270}:
+        return {
+            0: Cv2Rotation.NO_ROTATION,
+            90: Cv2Rotation.ROTATE_90,
+            180: Cv2Rotation.ROTATE_180,
+            -90: Cv2Rotation.ROTATE_270,
+            270: Cv2Rotation.ROTATE_270,
+        }[value]
+    raise ValueError(f"Unsupported camera rotation {value!r}. Use 0, 90, 180, 270, or enum name.")
+
+
+def patch_zed_backend():
+    """Patch the external ZED backend to disable depth and honor rotation."""
+    from lerobot.cameras.zed import camera_zed as zed_camera_module
+
+    if getattr(zed_camera_module, "_LEROBOT_FRANKA_ZED_PATCHED", False):
+        return
+
+    original_connect = zed_camera_module.ZedCamera.connect
+    original_get_frame = zed_camera_module.ZedCamera._get_frame
+
+    def connect_without_depth(self, warmup: bool = True):
+        if self.is_connected:
+            raise zed_camera_module.DeviceAlreadyConnectedError(f"{self} is already connected.")
+
+        try:
+            import pyzed.sl as sl
+        except ImportError:
+            raise ImportError(
+                "pyzed not installed. Run: python /usr/local/zed/get_python_api.py"
+            )
+
+        key = self.serial_number
+
+        with zed_camera_module._ZED_LOCK:
+            if key not in zed_camera_module._ZED_HANDLES:
+                cam = sl.Camera()
+                init = sl.InitParameters()
+                init.camera_resolution = zed_camera_module._get_zed_resolution(self.width, self.height)
+                init.camera_fps = self.fps
+                init.depth_mode = sl.DEPTH_MODE.NONE
+                if self.serial_number != 0:
+                    init.set_from_serial_number(self.serial_number)
+
+                status = cam.open(init)
+                if status != sl.ERROR_CODE.SUCCESS:
+                    raise ConnectionError(
+                        f"Failed to open ZED SN={self.serial_number}: {status}. "
+                        "Check USB 3.0 connection."
+                    )
+
+                zed_camera_module._ZED_HANDLES[key] = {
+                    "cam": cam,
+                    "mat_left": sl.Mat(),
+                    "mat_right": sl.Mat(),
+                    "ref_count": 0,
+                    "grab_lock": zed_camera_module.Lock(),
+                }
+                zed_camera_module.logger.info(
+                    f"ZED SN={self.serial_number} opened with depth disabled."
+                )
+
+            zed_camera_module._ZED_HANDLES[key]["ref_count"] += 1
+
+        self._handle_key = key
+        self._start_read_thread()
+
+        if warmup:
+            time.sleep(0.5)
+
+        zed_camera_module.logger.info(
+            f"{self} connected. {self.width}x{self.height} @ {self.fps}fps"
+        )
+
+    def get_frame_with_rotation(self):
+        frame = original_get_frame(self)
+        rotation = _parse_cv2_rotation(getattr(self.config, "rotation", Cv2Rotation.NO_ROTATION))
+        if rotation == Cv2Rotation.ROTATE_90:
+            return np.rot90(frame, k=3).copy()
+        if rotation == Cv2Rotation.ROTATE_180:
+            return np.rot90(frame, k=2).copy()
+        if rotation == Cv2Rotation.ROTATE_270:
+            return np.rot90(frame, k=1).copy()
+        return frame
+
+    zed_camera_module.ZedCamera.connect = connect_without_depth
+    zed_camera_module.ZedCamera._get_frame = get_frame_with_rotation
+    zed_camera_module._LEROBOT_FRANKA_ZED_PATCHED = True
+    zed_camera_module._LEROBOT_FRANKA_ORIGINAL_CONNECT = original_connect
+    zed_camera_module._LEROBOT_FRANKA_ORIGINAL_GET_FRAME = original_get_frame
+
+
+def attach_fps_monitor(
+    dataset: LeRobotDataset,
+    target_fps: float,
+    min_fps_ratio: float = 0.9,
+    window_size: int = 20,
+    report_cooldown_s: float = 5.0,
+):
+    """Report terminal errors when measured recording FPS falls below target."""
+    original_add_frame = dataset.add_frame
+    frame_intervals = deque(maxlen=window_size)
+    last_frame_time = None
+    last_report_time = 0.0
+    min_allowed_fps = target_fps * min_fps_ratio
+
+    def add_frame_with_monitor(frame):
+        nonlocal last_frame_time, last_report_time
+        now = time.perf_counter()
+        if last_frame_time is not None:
+            interval = now - last_frame_time
+            if interval > 0:
+                frame_intervals.append(interval)
+                if len(frame_intervals) == window_size:
+                    avg_interval = sum(frame_intervals) / len(frame_intervals)
+                    measured_fps = 1.0 / avg_interval
+                    if measured_fps < min_allowed_fps and now - last_report_time >= report_cooldown_s:
+                        logging.error(
+                            "====== [ERROR] Recording FPS is low: %.2f < %.2f target (configured %.2f) ======",
+                            measured_fps,
+                            min_allowed_fps,
+                            target_fps,
+                        )
+                        last_report_time = now
+        last_frame_time = now
+        return original_add_frame(frame)
+
+    dataset.add_frame = add_frame_with_monitor
+
+    def reset_monitor():
+        nonlocal last_frame_time, last_report_time
+        frame_intervals.clear()
+        last_frame_time = None
+        last_report_time = 0.0
+
+    return reset_monitor
 
 
 class RecordConfig:
@@ -70,6 +232,11 @@ class RecordConfig:
         self.gripper_reverse: bool = robot["gripper_reverse"]
         self.gripper_bin_threshold: float = robot["gripper_bin_threshold"]
         self.gripper_max_open: float = robot.get("gripper_max_open", 0.08)
+        self.gripper_force: float = robot.get("gripper_force", 40.0)
+        self.gripper_speed: float = robot.get("gripper_speed", 0.15)
+        self.gripper_grasp_width: float = robot.get("gripper_grasp_width", 0.03)
+        self.gripper_epsilon_inner: float = robot.get("gripper_epsilon_inner", 0.005)
+        self.gripper_epsilon_outer: float = robot.get("gripper_epsilon_outer", 0.005)
         self.execute_mode: str = robot.get("execute_mode", "ee_pose")  # "ee_pose" or "joint"
         
         # Task config
@@ -88,15 +255,36 @@ class RecordConfig:
         self.camera_type: str = cam.get("camera_type", "realsense")
         self.wrist_cam_serial: str = cam.get("wrist_cam_serial", "")
         self.exterior_cam_serial: str = cam.get("exterior_cam_serial", "")
+        self.exterior2_cam_serial: str = cam.get("exterior2_cam_serial", "")
         self.wrist_cam_index: int = cam.get("wrist_cam_index", 0)
         self.exterior_cam_index: int = cam.get("exterior_cam_index", 2)
+        self.exterior2_cam_index: int | None = cam.get("exterior2_cam_index")
         self.wrist_zed_serial: int = cam.get("wrist_zed_serial", 0)
         self.exterior_zed_serial: int = cam.get("exterior_zed_serial", 0)
+        self.exterior2_zed_serial: int | None = cam.get("exterior2_zed_serial")
+        self.wrist_zed_view: str = str(cam.get("wrist_zed_view", "left")).lower()
+        self.exterior_zed_view: str = str(cam.get("exterior_zed_view", "right")).lower()
+        self.exterior2_zed_view: str = str(cam.get("exterior2_zed_view", "left")).lower()
+        self.wrist_zed_rotation: Cv2Rotation = _parse_cv2_rotation(cam.get("wrist_zed_rotation", 0))
+        self.exterior_zed_rotation: Cv2Rotation = _parse_cv2_rotation(cam.get("exterior_zed_rotation", 0))
+        self.exterior2_zed_rotation: Cv2Rotation = _parse_cv2_rotation(cam.get("exterior2_zed_rotation", 0))
         self.width: int = cam["width"]
         self.height: int = cam["height"]
+
+        if self.wrist_zed_view not in {"left", "right"}:
+            raise ValueError(f"Invalid wrist_zed_view={self.wrist_zed_view!r}; expected 'left' or 'right'.")
+        if self.exterior_zed_view not in {"left", "right"}:
+            raise ValueError(
+                f"Invalid exterior_zed_view={self.exterior_zed_view!r}; expected 'left' or 'right'."
+            )
+        if self.exterior2_zed_view not in {"left", "right"}:
+            raise ValueError(
+                f"Invalid exterior2_zed_view={self.exterior2_zed_view!r}; expected 'left' or 'right'."
+            )
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
+        self.use_videos: bool = storage.get("use_videos", True)
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
@@ -238,11 +426,15 @@ def run_record(record_cfg: RecordConfig):
     try:
         dataset_name, data_version = generate_dataset_name(record_cfg)
 
+        if record_cfg.camera_type == "zed":
+            patch_zed_backend()
+
         # Check joint offsets
         # if not record_cfg.debug:
         #     check_joint_offsets(record_cfg)        
         
         # Create camera configurations
+        camera_config = {}
         if record_cfg.camera_type == "zed":
             wrist_image_cfg = ZedCameraConfig(
                 serial_number=record_cfg.wrist_zed_serial,
@@ -250,7 +442,8 @@ def run_record(record_cfg: RecordConfig):
                 width=record_cfg.width,
                 height=record_cfg.height,
                 color_mode=ColorMode.RGB,
-                view="left",
+                view=record_cfg.wrist_zed_view,
+                rotation=record_cfg.wrist_zed_rotation,
             )
             exterior_image_cfg = ZedCameraConfig(
                 serial_number=record_cfg.exterior_zed_serial,
@@ -258,8 +451,20 @@ def run_record(record_cfg: RecordConfig):
                 width=record_cfg.width,
                 height=record_cfg.height,
                 color_mode=ColorMode.RGB,
-                view="right",
+                view=record_cfg.exterior_zed_view,
+                rotation=record_cfg.exterior_zed_rotation,
             )
+            camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
+            if record_cfg.exterior2_zed_serial is not None:
+                camera_config["exterior2_image"] = ZedCameraConfig(
+                    serial_number=record_cfg.exterior2_zed_serial,
+                    fps=record_cfg.fps,
+                    width=record_cfg.width,
+                    height=record_cfg.height,
+                    color_mode=ColorMode.RGB,
+                    view=record_cfg.exterior2_zed_view,
+                    rotation=record_cfg.exterior2_zed_rotation,
+                )
         elif record_cfg.camera_type == "opencv":
             wrist_image_cfg = OpenCVCameraConfig(
                 index_or_path=record_cfg.wrist_cam_index,
@@ -277,6 +482,16 @@ def run_record(record_cfg: RecordConfig):
                 color_mode=ColorMode.RGB,
                 rotation=Cv2Rotation.NO_ROTATION,
             )
+            camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
+            if record_cfg.exterior2_cam_index is not None:
+                camera_config["exterior2_image"] = OpenCVCameraConfig(
+                    index_or_path=record_cfg.exterior2_cam_index,
+                    fps=record_cfg.fps,
+                    width=record_cfg.width,
+                    height=record_cfg.height,
+                    color_mode=ColorMode.RGB,
+                    rotation=Cv2Rotation.NO_ROTATION,
+                )
         else:
             wrist_image_cfg = RealSenseCameraConfig(
                 serial_number_or_name=record_cfg.wrist_cam_serial,
@@ -296,9 +511,18 @@ def run_record(record_cfg: RecordConfig):
                 use_depth=False,
                 rotation=Cv2Rotation.NO_ROTATION,
             )
-
+            camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
+            if record_cfg.exterior2_cam_serial:
+                camera_config["exterior2_image"] = RealSenseCameraConfig(
+                    serial_number_or_name=record_cfg.exterior2_cam_serial,
+                    fps=record_cfg.fps,
+                    width=record_cfg.width,
+                    height=record_cfg.height,
+                    color_mode=ColorMode.RGB,
+                    use_depth=False,
+                    rotation=Cv2Rotation.NO_ROTATION,
+                )
         # Create the robot and teleoperator configurations
-        camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
         
         # Create teleop config using the new method
         teleop_config = record_cfg.create_teleop_config()
@@ -312,15 +536,25 @@ def run_record(record_cfg: RecordConfig):
             gripper_reverse = record_cfg.gripper_reverse,
             gripper_bin_threshold = record_cfg.gripper_bin_threshold,
             gripper_max_open = record_cfg.gripper_max_open,
+            gripper_force = record_cfg.gripper_force,
+            gripper_speed = record_cfg.gripper_speed,
+            gripper_grasp_width = record_cfg.gripper_grasp_width,
+            gripper_epsilon_inner = record_cfg.gripper_epsilon_inner,
+            gripper_epsilon_outer = record_cfg.gripper_epsilon_outer,
             control_mode = record_cfg.control_mode,
             execute_mode = record_cfg.execute_mode,
         )
         # Initialize the robot
         robot = Franka(robot_config)
+        image_writer_threads = 4 * len(robot.cameras) if hasattr(robot, "cameras") else 4
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
-        obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)
+        obs_features = hw_to_dataset_features(
+            robot.observation_features,
+            "observation",
+            use_video=record_cfg.use_videos,
+        )
         dataset_features = {**action_features, **obs_features}
 
         if record_cfg.resume:
@@ -329,7 +563,7 @@ def run_record(record_cfg: RecordConfig):
             )
 
             if hasattr(robot, "cameras") and len(robot.cameras) > 0:
-                dataset.start_image_writer()
+                dataset.start_image_writer(num_processes=0, num_threads=image_writer_threads)
             sanity_check_dataset_robot_compatibility(dataset, robot, record_cfg.fps, dataset_features)
         else:
             # # Create the dataset
@@ -338,15 +572,22 @@ def run_record(record_cfg: RecordConfig):
                 fps=record_cfg.fps,
                 features=dataset_features,
                 robot_type=robot.name,
-                use_videos=True,
-                image_writer_threads=4,
+                use_videos=record_cfg.use_videos,
+                image_writer_threads=image_writer_threads,
             )
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_mera_period
+        reset_fps_monitor = attach_fps_monitor(dataset, float(record_cfg.fps))
+
+        if record_cfg.use_videos:
+            logging.info("====== [DATASET] Recording camera streams as videos ======")
+        else:
+            logging.info("====== [DATASET] Recording camera streams as images (video encoding disabled) ======")
 
         # Initialize the keyboard listener and rerun visualization
         _, events = init_keyboard_listener()
-        init_rerun(session_name="recording")
+        if record_cfg.display:
+            init_rerun(session_name="recording")
 
         # Create processor
         teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
@@ -386,6 +627,7 @@ def run_record(record_cfg: RecordConfig):
 
         while episode_idx < record_cfg.num_episodes and not events["stop_recording"]:
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
+            reset_fps_monitor()
             record_loop(
                 robot=robot,
                 events=events,

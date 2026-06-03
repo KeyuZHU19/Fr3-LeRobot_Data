@@ -17,7 +17,7 @@ class OculusRobot(Robot):
     
     Controls:
     - RG (Right Grip): Must be pressed to enable action recording
-    - RTr (Right Trigger): Controls gripper (0.0 = open, 1.0 = closed)
+    - RTr (Right Trigger): Toggles gripper open/close on each press
     - Right controller pose: Controls end-effector delta pose
     
     Coordinate Systems:
@@ -66,6 +66,7 @@ class OculusRobot(Robot):
         self._pose_scaler = pose_scaler
         self._channel_signs = channel_signs
         self._last_gripper_position = 1.0
+        self._last_rtr_pressed = False
         self._last_valid_action = np.zeros(7 if use_gripper else 6)
         self._prev_transform = None
         self._reset_requested = False
@@ -467,16 +468,14 @@ class OculusRobot(Robot):
         else:
             self._prev_transform = None
 
-        # 夹爪
+        # 夹爪：RTr 按下沿切换开/关状态
         gripper_position = self._last_gripper_position
         if self._use_gripper:
-            right_trigger = buttons.get('rightTrig', (0.0,))
-            if isinstance(right_trigger, tuple) and len(right_trigger) > 0:
-                trigger_value = right_trigger[0]
-            else:
-                trigger_value = 0.0
-            gripper_position = 1.0 - trigger_value
-            self._last_gripper_position = gripper_position
+            rtr_pressed = bool(buttons.get("RTr", False))
+            if rtr_pressed and not self._last_rtr_pressed:
+                gripper_position = 1.0 - self._last_gripper_position
+                self._last_gripper_position = gripper_position
+            self._last_rtr_pressed = rtr_pressed
             self._last_valid_action[6] = gripper_position
 
         return {
@@ -551,7 +550,7 @@ if __name__ == "__main__":
     print("===== Oculus Robot Test (with Placo IK) =====")
     print("Controls:")
     print("  - RG (Right Grip): Press to enable action recording")
-    print("  - RTr (Right Trigger): Control gripper (press = close)")
+    print("  - RTr (Right Trigger): Toggle gripper open/close")
     print("  - A button: Request robot reset")
     print("  - Right controller: Move to control end-effector")
     print(f"\nPlaco IK: {'ENABLED' if oculus._ik_enabled else 'DISABLED'}")
@@ -587,5 +586,4 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         print("\n\n===== Test Ended =====")
-
 

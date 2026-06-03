@@ -23,7 +23,7 @@ class OculusTeleop(BaseTeleop):
     
     Controls:
     - RG (Right Grip): Must be pressed to enable action recording
-    - RTr (Right Trigger): Controls gripper (0.0 = open, 1.0 = closed)
+    - RTr (Right Trigger): Toggles gripper open/close on each press
     - Right controller pose: Controls end-effector delta pose
     """
     

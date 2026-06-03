@@ -33,7 +33,7 @@ Now we support the end-effector pose control using Oculus Quest 3/3s devices.
 The Oculus Quest controller provides 6-DoF tracking for intuitive end-effector control. The right controller is used for robot manipulation with the following controls:
 
 - **RG (Right Grip)**: Must be pressed to enable robot movement
-- **RTr (Right Trigger)**: Controls gripper (press to close, release to open)
+- **RTr (Right Trigger)**: Toggles gripper open/close on each press
 - **A Button**: Request robot reset
 - **Right controller pose**: Controls end-effector delta pose
 
@@ -266,7 +266,7 @@ record:
 | Control | Function |
 |---------|----------|
 | **RG (Right Grip)** | Press and hold to enable robot movement |
-| **RTr (Right Trigger)** | Press to close gripper, release to open |
+| **RTr (Right Trigger)** | Toggle gripper open/close on each press |
 | **A Button** | Request robot reset |
 | **Right Controller Pose** | Controls end-effector delta pose |
 
