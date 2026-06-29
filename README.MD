@@ -57,7 +57,58 @@ This environment is used to run:
 - `launch_gripper.py`
 - `franka_interface_server.py`
 
-This repo does **not** recreate Polymetis from scratch. It assumes your local Franka/Polymetis stack is already installed and working.
+On this PC, `polymetis-local` is built from the Franka-specific fork at:
+
+- `https://github.com/Shenzhaolong1330/fairo-franka`
+
+Use these commands directly:
+
+```bash
+cd ~
+git clone https://github.com/Shenzhaolong1330/fairo-franka.git
+cd ~/fairo-franka/polymetis
+
+conda env create -f ./polymetis/environment.yml -n polymetis-local
+conda activate polymetis-local
+
+cd ~/fairo-franka/polymetis/polymetis
+./install.sh
+```
+
+That is the simplest path because `install.sh` builds Polymetis and installs the Python package in editable mode.
+
+If you already have a local `libfranka` build and want to link against it explicitly, use:
+
+```bash
+cd ~/fairo-franka/polymetis
+conda activate polymetis-local
+cd polymetis
+mkdir -p build
+cd build
+cmake -DBUILD_FRANKA=ON -DFranka_DIR=/home/franka/libfranka/build -DCMAKE_BUILD_TYPE=Release -DBUILD_DOCS=OFF ..
+make -j
+cd ..
+pip install -e .
+```
+
+After installation, these commands should resolve:
+
+```bash
+conda activate polymetis-local
+which launch_robot.py
+which launch_gripper.py
+which franka_panda_client
+which franka_hand_client
+```
+
+On this machine, the working environment is:
+
+- `Python 3.8.0`
+- `torch 1.13.1`
+- `hydra-core 1.0.6`
+- `polymetis 0.2`
+
+If those executables are missing, `polymetis-local` is not installed correctly yet.
 
 ### 2.2 `franka_data`
 
